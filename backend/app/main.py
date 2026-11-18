@@ -1,5 +1,10 @@
 """Pale Horse CRM MVP API. Local development starter; not production hardened."""
 import os
+import secrets
+import urllib.parse
+import httpx
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi.responses import RedirectResponse
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Literal
 from uuid import uuid4
@@ -41,6 +46,24 @@ class Lead(Base):
     stage = Column(String(30), nullable=False, default="new")
     assigned_trainer_id = Column(String, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+class InterestType(Base):
+    """Gym-wide prospect interest catalog, with a stable, case-insensitive key."""
+    __tablename__ = "crm_interest_types"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    name = Column(String(80), nullable=False)
+    name_key = Column(String(80), nullable=False, unique=True)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+DEFAULT_INTEREST_TYPES = (
+    "Personal training", "Powerlifting coaching", "Strength & conditioning",
+    "General fitness", "Assessment / consultation", "Nutrition coaching",
+    "Group training", "Online coaching",
+)
+
+def interest_key(label: str) -> str:
+    return " ".join(label.split()).casefold()
 
 class Activity(Base):
     __tablename__ = "activities"
@@ -158,7 +181,108 @@ class SessionAudit(Base):
     detail = Column(Text, nullable=False, default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
+
+# Owner-only business follow-ups. Crucible Wellness is a separate business, not a gym client category.
+class OwnerTask(Base):
+    __tablename__ = "crm_owner_tasks"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    business = Column(String(30), nullable=False)
+    kind = Column(String(30), nullable=False, default="callback")
+    title = Column(String(180), nullable=False)
+    contact_name = Column(String(150), nullable=False, default="")
+    contact_email = Column(String(255), nullable=False, default="")
+    contact_phone = Column(String(50), nullable=False, default="")
+    due_at = Column(DateTime(timezone=True), nullable=True)
+    notes = Column(Text, nullable=False, default="")
+    status = Column(String(16), nullable=False, default="open")
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_by_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+class OwnerGmailConnection(Base):
+    __tablename__ = "crm_owner_gmail_connections"
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    account_email = Column(String(255), nullable=False)
+    encrypted_refresh_token = Column(Text, nullable=False)
+    connected_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+class OwnerTaskEvent(Base):
+    __tablename__ = "crm_owner_task_events"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    task_id = Column(String, ForeignKey("crm_owner_tasks.id"), nullable=False)
+    actor_id = Column(String, ForeignKey("users.id"), nullable=False)
+    action = Column(String(24), nullable=False)
+    detail = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+# v0.2.8: one class with multiple coaches and a changeable current roster.
+class GymEvent(Base):
+    __tablename__ = "crm_gym_events"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    name = Column(String(150), nullable=False)
+    kind = Column(String(16), nullable=False)  # class or block
+    created_by_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+
+class GymEventPattern(Base):
+    __tablename__ = "crm_gym_event_patterns"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String, ForeignKey("crm_gym_events.id"), nullable=False, index=True)
+    weekday = Column(Integer, nullable=False)
+    start_time = Column(Time, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    materialized_through = Column(DateTime(timezone=False), nullable=False)
+    end_date = Column(DateTime(timezone=False), nullable=True)
+
+class GymEventCoach(Base):
+    __tablename__ = "crm_gym_event_coaches"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String, ForeignKey("crm_gym_events.id"), nullable=False, index=True)
+    coach_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    active = Column(Boolean, nullable=False, default=True)
+
+class GymEventMember(Base):
+    __tablename__ = "crm_gym_event_members"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String, ForeignKey("crm_gym_events.id"), nullable=False, index=True)
+    lead_id = Column(String, ForeignKey("leads.id"), nullable=False, index=True)
+    active = Column(Boolean, nullable=False, default=True)
+    joined_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    left_at = Column(DateTime(timezone=True), nullable=True)
+
+class GymEventOccurrence(Base):
+    __tablename__ = "crm_gym_event_occurrences"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String, ForeignKey("crm_gym_events.id"), nullable=False, index=True)
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(16), nullable=False, default="confirmed")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+class GymEventLog(Base):
+    __tablename__ = "crm_gym_event_log"
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String, ForeignKey("crm_gym_events.id"), nullable=False, index=True)
+    actor_id = Column(String, ForeignKey("users.id"), nullable=False)
+    action = Column(String(40), nullable=False)
+    detail = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
 Base.metadata.create_all(engine)
+# Safe additive migration for v0.2.7; no existing tasks are deleted.
+with engine.begin() as conn:
+    if engine.dialect.name == "postgresql":
+        conn.execute(text("ALTER TABLE crm_owner_tasks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ"))
+        conn.execute(text("UPDATE crm_owner_tasks SET completed_at = updated_at WHERE status = 'done' AND completed_at IS NULL"))
+    elif engine.dialect.name == "sqlite":
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(crm_owner_tasks)")}
+        if "completed_at" not in columns:
+            conn.exec_driver_sql("ALTER TABLE crm_owner_tasks ADD COLUMN completed_at DATETIME")
+        conn.execute(text("UPDATE crm_owner_tasks SET completed_at = updated_at WHERE status = 'done' AND completed_at IS NULL"))
+
 # PostgreSQL exclusion constraint is the final arbiter of concurrent confirmed bookings.
 # It also covers overlapping bookings for the same client on different trainers.
 if engine.dialect.name == "postgresql":
@@ -197,6 +321,24 @@ with SessionLocal() as db:
         db.add(User(email=email, name="Gym Owner", role="owner", password_hash=passwords.hash(password)))
         db.commit()
 
+# Add options without rewriting or deleting any existing lead interest values.
+# Legacy free-text interests are included so they remain selectable and reportable.
+with SessionLocal() as db:
+    labels = list(DEFAULT_INTEREST_TYPES)
+    labels += [v for v in db.scalars(select(Lead.interest).distinct()).all() if v]
+    for raw in labels:
+        name = " ".join(raw.strip().split())
+        key = interest_key(name)
+        if not name or len(name) > 80 or key in ("other", "select an interest"):
+            continue
+        if engine.dialect.name == "postgresql":
+            db.execute(text("INSERT INTO crm_interest_types (id,name,name_key,active,created_at) "
+                            "VALUES (:id,:name,:key,true,:now) ON CONFLICT (name_key) DO NOTHING"),
+                       {"id": str(uuid4()), "name": name, "key": key, "now": datetime.now(timezone.utc)})
+        elif not db.scalar(select(InterestType.id).where(InterestType.name_key == key)):
+            db.add(InterestType(name=name, name_key=key))
+    db.commit()
+
 app = FastAPI(title="Pale Horse CRM", docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=[os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")], allow_credentials=True, allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "X-CSRF-Token"])
 
@@ -214,8 +356,12 @@ class LeadCreate(BaseModel):
     interest: str = Field(default="Personal training", max_length=255)
 
 class LeadUpdate(BaseModel):
+    interest: str | None = Field(default=None, max_length=80)
     stage: Literal["new", "contacted", "consultation", "trial", "converted", "follow_up", "lost"] | None = None
     assigned_trainer_id: str | None = None
+
+class InterestTypeCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
 
 class ActivityCreate(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
@@ -290,6 +436,42 @@ def add_trainer(payload: TrainerCreate, user: User = Depends(current_user), db: 
     db.add(u); db.commit()
     return {"id":u.id,"name":u.name,"email":u.email}
 
+def canonical_interest(db: Session, raw: str) -> str:
+    label = " ".join(raw.strip().split())
+    item = db.scalar(select(InterestType).where(InterestType.name_key == interest_key(label), InterestType.active == True))
+    if not item:
+        raise HTTPException(422, "Select a listed interest or add a new type using Other")
+    return item.name
+
+@app.get("/api/interest-types")
+def list_interest_types(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    return [x.name for x in db.scalars(select(InterestType).where(InterestType.active == True).order_by(InterestType.name)).all()]
+
+@app.post("/api/interest-types", status_code=201)
+def create_interest_type(payload: InterestTypeCreate, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    name = " ".join(payload.name.strip().split())
+    key = interest_key(name)
+    if len(name) < 2 or key in ("other", "select an interest"):
+        raise HTTPException(422, "Enter a meaningful interest type")
+    existing = db.scalar(select(InterestType).where(InterestType.name_key == key))
+    if existing:
+        if not existing.active:
+            existing.active = True
+            db.commit()
+        return {"name": existing.name, "created": False}
+    obj = InterestType(name=name, name_key=key)
+    db.add(obj)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        obj = db.scalar(select(InterestType).where(InterestType.name_key == key))
+        if not obj:
+            raise HTTPException(409, "Could not save interest type; retry")
+        return {"name": obj.name, "created": False}
+    return {"name": name, "created": True}
+
 @app.get("/api/leads")
 def leads(user: User = Depends(current_user), db: Session = Depends(db_session)):
     stmt = select(Lead).order_by(Lead.created_at.desc())
@@ -299,7 +481,9 @@ def leads(user: User = Depends(current_user), db: Session = Depends(db_session))
 @app.post("/api/leads")
 def add_lead(payload: LeadCreate, user: User = Depends(current_user), db: Session = Depends(db_session)):
     owner_only(user)
-    lead = Lead(**payload.model_dump()); db.add(lead); db.commit(); db.refresh(lead)
+    data = payload.model_dump()
+    data["interest"] = canonical_interest(db, data["interest"])
+    lead = Lead(**data); db.add(lead); db.commit(); db.refresh(lead)
     return serialize_lead(lead, db)
 
 @app.patch("/api/leads/{lead_id}")
@@ -312,6 +496,9 @@ def update_lead(lead_id: str, payload: LeadUpdate, user: User = Depends(current_
         raise HTTPException(409, "Use trainer scheduling to assign or return clients with an audit trail")
     if "stage" in fields and payload.stage:
         lead.stage = payload.stage
+    if "interest" in fields and payload.interest is not None:
+        owner_only(user)
+        lead.interest = canonical_interest(db, payload.interest)
     db.commit(); db.refresh(lead)
     return serialize_lead(lead, db)
 
@@ -332,9 +519,13 @@ def add_activity(lead_id: str, payload: ActivityCreate, user: User = Depends(cur
     return {"id":a.id}
 
 @app.get("/api/integrations/gmail/status")
-def gmail_status(user: User = Depends(current_user)):
+def gmail_status(user: User = Depends(current_user), db: Session = Depends(db_session)):
     owner_only(user)
-    return {"connected":False,"account":"noah@palehorsebarbell.com","message":"Google Workspace OAuth has not been configured. No Gmail data is accessed."}
+    allowed = os.environ.get("GOOGLE_ALLOWED_EMAIL", "noah@palehorsebarbell.com").lower()
+    connected = bool(db.get(OwnerGmailConnection, user.id)) if user.email.lower() == allowed else False
+    return {"connected": connected, "account": allowed,
+            "message": ("Google Workspace connected for Owner Operations." if connected else
+                        "Google Workspace OAuth has not been connected. No Gmail data is accessed.")}
 
 
 # ---- v0.2.0 trainer scheduling ----
@@ -391,7 +582,17 @@ def available(db, tid, start, end):
         day += timedelta(days=1)
     return True
 
+def gym_busy(db, trainer_id, start, end, exclude_occurrence_id=None):
+    stmt = (select(GymEventOccurrence.id).join(GymEventCoach, GymEventCoach.event_id == GymEventOccurrence.event_id)
+            .where(GymEventCoach.coach_id == trainer_id, GymEventCoach.active == True,
+                   GymEventOccurrence.status == "confirmed", GymEventOccurrence.starts_at < end,
+                   GymEventOccurrence.ends_at > start))
+    if exclude_occurrence_id:
+        stmt = stmt.where(GymEventOccurrence.id != exclude_occurrence_id)
+    return db.scalar(stmt) is not None
+
 def conflicts(db, trainer_id, lead_id, start, end, exclude_id=None):
+    if gym_busy(db, trainer_id, start, end): return True
     query = select(Assignment).where(Assignment.status == "confirmed", Assignment.starts_at < end,
                                       Assignment.ends_at > start,
                                       or_(Assignment.trainer_id == trainer_id, Assignment.lead_id == lead_id))
@@ -636,6 +837,28 @@ def build_calendar(db, trainer_id, start, end, include_details):
         lead=db.get(Lead,a.lead_id)
         items.append({"id":a.id,"kind":"confirmed","trainer_id":trainer_id,"starts_at":iso(a.starts_at),
                       "ends_at":iso(a.ends_at),"title":lead.name if include_details and lead else "Training session"})
+    for occ, evt in db.execute(select(GymEventOccurrence, GymEvent).join(GymEvent, GymEvent.id == GymEventOccurrence.event_id)
+            .join(GymEventCoach, GymEventCoach.event_id == GymEvent.id)
+            .where(GymEventCoach.coach_id == trainer_id, GymEventCoach.active == True,
+                   GymEventOccurrence.status == "confirmed", GymEvent.active == True,
+                   GymEventOccurrence.starts_at < end, GymEventOccurrence.ends_at > start)).all():
+        items.append({"id": occ.id, "kind": "confirmed", "trainer_id": trainer_id,
+                      "starts_at": iso(occ.starts_at), "ends_at": iso(occ.ends_at),
+                      "title": evt.name if evt.kind == "class" else "Blocked: " + evt.name,
+                      "group_event_id": evt.id})
+    # Do not advertise free time occupied by a class or non-client block.
+    busy = [(utc(o.starts_at), utc(o.ends_at)) for o in db.scalars(
+        select(GymEventOccurrence).join(GymEventCoach, GymEventCoach.event_id == GymEventOccurrence.event_id)
+        .where(GymEventCoach.coach_id == trainer_id, GymEventCoach.active == True,
+               GymEventOccurrence.status == "confirmed", GymEventOccurrence.starts_at < end,
+               GymEventOccurrence.ends_at > start)).all()]
+    if busy:
+        free_items = [i for i in items if i["kind"] == "free"]
+        items = [i for i in items if i["kind"] != "free"]
+        for i in free_items:
+            for j,(a,b) in enumerate(subtract_intervals([(datetime.fromisoformat(i["starts_at"]),
+                datetime.fromisoformat(i["ends_at"]))], merge_intervals(busy))):
+                items.append({**i,"id":i["id"]+"-"+str(j),"starts_at":iso(a),"ends_at":iso(b)})
     return sorted(items,key=lambda x:x["starts_at"])
 
 @app.get("/api/calendar/events")
@@ -647,13 +870,26 @@ def calendar_events(starts_at: datetime, ends_at: datetime, trainer_id: str | No
         ids=[user.id]
     else:
         owner_only(user)
-        ids=[trainer_id] if trainer_id else list(db.scalars(select(User.id).where(User.role=="trainer")))
+        ids=[trainer_id] if trainer_id else list(db.scalars(select(User.id).where(User.role.in_(["trainer", "owner", "admin"]))))
     results=[]
     for tid in ids:
-        t=require_trainer(db,tid)
+        t=db.get(User,tid)
+        if not t or t.role not in ("trainer","owner","admin"): raise HTTPException(404)
         for item in build_calendar(db,tid,start,end,True):
             item["trainer_name"]=t.name
             results.append(item)
+    if user.role != "trainer" and not trainer_id:
+        combined=[]; known=set()
+        for r in sorted(results,key=lambda x:x["starts_at"]):
+            if r.get("group_event_id"):
+                if r["id"] in known: continue
+                known.add(r["id"])
+                ev=db.get(GymEvent,r["group_event_id"])
+                co=db.scalars(select(GymEventCoach).where(GymEventCoach.event_id==ev.id,
+                                                         GymEventCoach.active==True)).all()
+                r["trainer_name"]=" + ".join(db.get(User,c.coach_id).name for c in co)
+            combined.append(r)
+        return combined
     return sorted(results,key=lambda x:x["starts_at"])
 
 @app.post("/api/calendar/subscription")
@@ -714,6 +950,106 @@ def calendar_feed(token: str, db: Session=Depends(db_session)):
                        headers={"Cache-Control":"private, no-store","X-Robots-Tag":"noindex"})
 
 
+# ---- v0.2.9 one-appointment calendar downloads (no OAuth required) ----
+def calendar_event_ics(uid: str, starts_at: datetime, ends_at: datetime,
+                       summary: str, updated_at: datetime | None = None) -> str:
+    """Private single-event download; deliberately omits attendee/health/contact data."""
+    # RFC 5545: escape content and fold long content lines at <=75 octets.
+    def fold(line: str) -> str:
+        fragments=[]
+        current=''
+        for character in line:
+            candidate=current+character
+            if len(candidate.encode('utf-8')) > 75 and current:
+                fragments.append(current)
+                current=' '+character
+            else:
+                current=candidate
+        fragments.append(current)
+        return '\r\n'.join(fragments)
+    fields=[
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Pale Horse Barbell//CRM//EN',
+        'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT',
+        'UID:'+uid+'@palehorsebarbell.com',
+        'DTSTAMP:'+ics_date(updated_at or datetime.now(timezone.utc)),
+        'DTSTART:'+ics_date(starts_at), 'DTEND:'+ics_date(ends_at),
+        'SUMMARY:'+ics_escape(summary),
+        'DESCRIPTION:'+ics_escape('Pale Horse Barbell training appointment. Confirm changes with your coach.'),
+        'END:VEVENT', 'END:VCALENDAR'
+    ]
+    return '\r\n'.join(fold(line) for line in fields)+'\r\n'
+
+def private_calendar_download(content: str, filename: str):
+    return RawResponse(content=content,media_type='text/calendar; charset=utf-8',headers={
+        'Content-Disposition':f'attachment; filename="{filename}"',
+        'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff',
+        'X-Robots-Tag':'noindex'
+    })
+
+@app.get('/api/calendar/sessions/{session_id}/invitation.ics')
+def client_session_invitation(session_id: str, user: User=Depends(current_user),
+                              db: Session=Depends(db_session)):
+    s=db.get(ClientSession,session_id)
+    if not s: raise HTTPException(404,'Session not found')
+    trainer_self_or_owner(user,s.trainer_id)
+    if s.status!='confirmed': raise HTTPException(409,'Only confirmed sessions can be exported')
+    return private_calendar_download(calendar_event_ics(
+        s.id,s.starts_at,s.ends_at,'Pale Horse Barbell – '+s.session_type,s.updated_at),
+        'palehorse-training.ics')
+
+@app.get('/api/calendar/classes/{event_id}/occurrences/{occurrence_id}/invitation.ics')
+def gym_occurrence_invitation(event_id: str, occurrence_id: str,
+                               user: User=Depends(current_user),db: Session=Depends(db_session)):
+    ev=gym_event_access(db,event_id,user)
+    occurrence=db.get(GymEventOccurrence,occurrence_id)
+    if not occurrence or occurrence.event_id!=event_id:
+        raise HTTPException(404,'Class occurrence not found')
+    if occurrence.status!='confirmed' or not ev.active:
+        raise HTTPException(409,'Only confirmed class dates can be exported')
+    # No roster or attendee data in the exported invitation.
+    title=('Pale Horse Barbell – '+ev.name) if ev.kind=='class' else 'Pale Horse Barbell – Busy'
+    return private_calendar_download(calendar_event_ics(
+        occurrence.id,occurrence.starts_at,occurrence.ends_at,title,occurrence.created_at),
+        'palehorse-class.ics')
+
+
+@app.get('/api/calendar/classes/{event_id}/series.ics')
+def gym_class_series_download(event_id: str, user: User=Depends(current_user),
+                              db: Session=Depends(db_session)):
+    """One download containing confirmed class dates in the upcoming year.
+
+    Each occurrence is its own VEVENT with its existing stable UID. This keeps
+    moved times intact and omits cancelled dates instead of re-generating the
+    recurrence pattern (which could resurrect cancelled classes).
+    """
+    ev = gym_event_access(db, event_id, user)
+    if not ev.active or ev.kind != 'class':
+        raise HTTPException(409, 'Only active group classes can be exported as a series')
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=365)
+    dates = db.scalars(select(GymEventOccurrence).where(
+        GymEventOccurrence.event_id == event_id,
+        GymEventOccurrence.status == 'confirmed',
+        GymEventOccurrence.starts_at >= now,
+        GymEventOccurrence.starts_at < cutoff,
+    ).order_by(GymEventOccurrence.starts_at)).all()
+    if not dates:
+        raise HTTPException(404, 'No upcoming confirmed class dates to export in the next year')
+    title = 'Pale Horse Barbell – ' + ev.name
+    # Reuse the single-date exporter so stable IDs, privacy, UTC formatting,
+    # and RFC 5545 line-folding remain consistent.
+    components = []
+    for item in dates:
+        single = calendar_event_ics(item.id, item.starts_at, item.ends_at,
+                                    title, item.created_at)
+        components.append('BEGIN:VEVENT\r\n' + single.split('BEGIN:VEVENT\r\n', 1)[1].split('\r\nEND:VEVENT', 1)[0] + '\r\nEND:VEVENT')
+    calendar = ('BEGIN:VCALENDAR\r\nVERSION:2.0\r\n'
+                'PRODID:-//Pale Horse Barbell//CRM//EN\r\n'
+                'CALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\n'
+                + '\r\n'.join(components) + '\r\nEND:VCALENDAR\r\n')
+    return private_calendar_download(calendar, 'palehorse-class-series.ics')
+
+
 # ---- v0.2.2 existing clients / session scheduling ----
 class OnboardIn(BaseModel):
     name: str = Field(min_length=1, max_length=150)
@@ -758,6 +1094,7 @@ def client_access(db, actor, lead_id, tid):
     return lead
 
 def session_conflict(db,tid,lid,start,end,exclude=None):
+    if gym_busy(db,tid,start,end): return True
     stmt=select(ClientSession.id).where(ClientSession.status=="confirmed",ClientSession.starts_at<end,ClientSession.ends_at>start,
          or_(ClientSession.trainer_id==tid,ClientSession.lead_id==lid))
     if exclude: stmt=stmt.where(ClientSession.id!=exclude)
@@ -803,7 +1140,41 @@ def review_onboarding(request_id:str,decision:Literal["approve","reject"],user:U
         lead=db.get(Lead,row.lead_id)
         if lead.assigned_trainer_id and lead.assigned_trainer_id!=row.trainer_id: raise HTTPException(409,"Already assigned")
         lead.assigned_trainer_id=row.trainer_id
+        # Import rows staged for this client become schedulable only after approval.
+        from .imports import activate_approved_client
+        activate_approved_client(db,lead.id,user)
     db.commit();return {"status":row.status}
+
+@app.get("/api/sessions/search")
+def search_sessions(starts_at: datetime, ends_at: datetime, trainer_id: str | None = None,
+                    lead_id: str | None = None, status: str = "all", limit: int = 30,
+                    offset: int = 0, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    """Paged trainer-scoped appointment query for the Client Sessions list."""
+    start, end = calendar_window(starts_at, ends_at)
+    if status not in ("all", "upcoming", "completed"):
+        raise HTTPException(422, "Invalid status filter")
+    if not (1 <= limit <= 100) or not (0 <= offset <= 100000):
+        raise HTTPException(422, "Invalid page size or offset")
+    stmt = select(ClientSession).where(ClientSession.starts_at < end, ClientSession.ends_at > start)
+    if user.role == "trainer":
+        if trainer_id and trainer_id != user.id: raise HTTPException(403)
+        stmt = stmt.where(ClientSession.trainer_id == user.id)
+    else:
+        owner_only(user)
+        if trainer_id:
+            require_trainer(db, trainer_id)
+            stmt = stmt.where(ClientSession.trainer_id == trainer_id)
+    if lead_id:
+        # Never leak an unrelated client's existence; trainer scope still applies.
+        stmt = stmt.where(ClientSession.lead_id == lead_id)
+    if status == "upcoming":
+        stmt = stmt.where(ClientSession.status == "confirmed",
+                          ClientSession.starts_at >= datetime.now(timezone.utc))
+    elif status == "completed":
+        stmt = stmt.where(ClientSession.status == "completed")
+    rows = db.scalars(stmt.order_by(ClientSession.starts_at, ClientSession.id).offset(offset).limit(limit + 1)).all()
+    return {"items": [serialize_session(row, db) for row in rows[:limit]],
+            "has_more": len(rows) > limit, "offset": offset, "limit": limit}
 
 @app.get("/api/sessions")
 def list_sessions(starts_at:datetime,ends_at:datetime,trainer_id:str|None=None,user:User=Depends(current_user),db:Session=Depends(db_session)):
@@ -1029,3 +1400,512 @@ def list_series(user:User=Depends(current_user),db:Session=Depends(db_session)):
     return [{"id":s.id,"trainer_id":s.trainer_id,"lead_id":s.lead_id,
              "client_name":db.get(Lead,s.lead_id).name,"active":s.active,"until_date":iso(s.until_date),
              "materialized_through":iso(s.materialized_through)} for s in db.scalars(stmt)]
+
+# v0.2.5: schedule imports and searchable client directory
+from . import imports as _schedule_imports  # noqa: F401
+
+
+# Owner Operations — intentionally small: list, add, complete/reopen, and notes.
+OWNER_BUSINESSES = {"pale_horse", "crucible_wellness"}
+OWNER_KINDS = {"callback", "follow_up", "supplier", "admin", "other"}
+
+class OwnerTaskCreate(BaseModel):
+    business: Literal["pale_horse", "crucible_wellness"]
+    kind: Literal["callback", "follow_up", "supplier", "admin", "other"] = "callback"
+    title: str = Field(min_length=2, max_length=180)
+    contact_name: str = Field(default="", max_length=150)
+    contact_email: str = Field(default="", max_length=255)
+    contact_phone: str = Field(default="", max_length=50)
+    due_at: datetime | None = None
+    notes: str = Field(default="", max_length=3000)
+
+class OwnerTaskStatus(BaseModel):
+    status: Literal["open", "done"]
+
+class OwnerTaskNote(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+def owner_task_dict(task: OwnerTask):
+    return {"id": task.id, "business": task.business, "kind": task.kind,
+            "title": task.title, "contact_name": task.contact_name,
+            "contact_email": task.contact_email, "contact_phone": task.contact_phone,
+            "due_at": iso(task.due_at) if task.due_at else None, "notes": task.notes,
+            "status": task.status, "completed_at": iso(task.completed_at) if task.completed_at else None,
+            "archived": (task.status == "done" and task.completed_at is not None and
+                         task.completed_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc) - timedelta(days=7)),
+            "created_at": iso(task.created_at),
+            "updated_at": iso(task.updated_at)}
+
+def owner_event(db: Session, task: OwnerTask, user: User, action: str, detail: str = ""):
+    db.add(OwnerTaskEvent(task_id=task.id, actor_id=user.id, action=action, detail=detail))
+
+@app.get("/api/owner/tasks")
+def owner_tasks(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    return [owner_task_dict(t) for t in db.scalars(select(OwnerTask).order_by(OwnerTask.created_at.desc())).all()]
+
+@app.post("/api/owner/tasks", status_code=201)
+def owner_add_task(payload: OwnerTaskCreate, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    task = OwnerTask(**{**payload.model_dump(), "title": payload.title.strip()}, created_by_id=user.id)
+    db.add(task)
+    db.flush()
+    owner_event(db, task, user, "created", f"{task.business}: {task.title}")
+    db.commit()
+    db.refresh(task)
+    return owner_task_dict(task)
+
+@app.post("/api/owner/tasks/{task_id}/status")
+def owner_set_task_status(task_id: str, payload: OwnerTaskStatus, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    task = db.get(OwnerTask, task_id)
+    if task is None: raise HTTPException(404, "Task not found")
+    if task.status != payload.status:
+        task.status = payload.status
+        task.completed_at = datetime.now(timezone.utc) if payload.status == "done" else None
+        task.updated_at = datetime.now(timezone.utc)
+        owner_event(db, task, user, "status", payload.status)
+        db.commit()
+    return owner_task_dict(task)
+
+@app.post("/api/owner/tasks/{task_id}/notes")
+def owner_add_task_note(task_id: str, payload: OwnerTaskNote, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    task = db.get(OwnerTask, task_id)
+    if task is None: raise HTTPException(404, "Task not found")
+    owner_event(db, task, user, "note", payload.note.strip())
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/owner/tasks/{task_id}/history")
+def owner_task_history(task_id: str, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    if db.get(OwnerTask, task_id) is None: raise HTTPException(404, "Task not found")
+    events = db.scalars(select(OwnerTaskEvent).where(OwnerTaskEvent.task_id == task_id).order_by(OwnerTaskEvent.created_at.desc())).all()
+    return [{"id": event.id, "action": event.action, "detail": event.detail,
+             "created_at": iso(event.created_at),
+             "actor": (db.get(User, event.actor_id).name if db.get(User, event.actor_id) else "Owner")}
+            for event in events]
+
+
+# v0.2.7 — Gmail-to-task integration. Explicit consent; no unattended inbox imports.
+# A Google Cloud OAuth web client and secure token encryption key are required.
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_ACCOUNT = os.environ.get("GOOGLE_ALLOWED_EMAIL", "noah@palehorsebarbell.com").lower()
+
+def gmail_owner(user: User):
+    owner_only(user)
+    if user.email.lower() != GMAIL_ACCOUNT:
+        raise HTTPException(403, "Only the designated Gmail account owner may connect or import emails")
+
+def gmail_config():
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+    key = os.environ.get("GOOGLE_TOKEN_ENCRYPTION_KEY", "")
+    if not all([client_id, client_secret, redirect_uri, key]):
+        raise HTTPException(503, "Google Workspace OAuth is not configured. See README-v0.2.7.md")
+    try:
+        cipher = Fernet(key.encode())
+    except Exception:
+        raise HTTPException(503, "Invalid Google token encryption key")
+    return client_id, client_secret, redirect_uri, cipher
+
+@app.get("/api/owner/gmail/status")
+def owner_gmail_status(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    owner_only(user)
+    account_owner = user.email.lower() == GMAIL_ACCOUNT
+    connected = db.get(OwnerGmailConnection, user.id) if account_owner else None
+    return {"connected": bool(connected), "account": GMAIL_ACCOUNT, "can_connect": account_owner,
+            "configured": bool(os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_TOKEN_ENCRYPTION_KEY"))}
+
+@app.get("/api/owner/gmail/connect")
+def owner_gmail_connect(user: User = Depends(current_user)):
+    gmail_owner(user)
+    client_id, _, redirect_uri, _ = gmail_config()
+    nonce = secrets.token_urlsafe(24)
+    state = jwt.encode({"sub": user.id, "nonce": nonce, "exp": datetime.now(timezone.utc)+timedelta(minutes=10)}, SECRET_KEY, algorithm="HS256")
+    params = urllib.parse.urlencode({"client_id": client_id, "redirect_uri": redirect_uri,
+        "response_type": "code", "scope": GMAIL_SCOPE, "access_type": "offline",
+        "prompt": "consent", "state": state})
+    result = RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + params, status_code=302)
+    result.set_cookie("phcrm_google_oauth_nonce", nonce, secure=os.environ.get("COOKIE_SECURE", "false").lower()=="true", httponly=True, samesite="lax", max_age=600)
+    return result
+
+@app.get("/api/owner/gmail/callback")
+def owner_gmail_callback(request: Request, code: str = "", state: str = "", user: User = Depends(current_user), db: Session = Depends(db_session)):
+    gmail_owner(user)
+    try:
+        payload = jwt.decode(state, SECRET_KEY, algorithms=["HS256"])
+        if payload.get("sub") != user.id or not secrets.compare_digest(payload.get("nonce", ""), request.cookies.get("phcrm_google_oauth_nonce", "")):
+            raise ValueError("OAuth state mismatch")
+    except (jwt.InvalidTokenError, ValueError):
+        raise HTTPException(403, "Google authentication state expired or invalid")
+    if not code:
+        raise HTTPException(400, "Google did not provide an authorization code")
+    client_id, client_secret, redirect_uri, cipher = gmail_config()
+    try:
+        response = httpx.post("https://oauth2.googleapis.com/token", data={"code": code, "client_id":client_id,
+            "client_secret":client_secret,"redirect_uri":redirect_uri,"grant_type":"authorization_code"},timeout=15)
+        response.raise_for_status()
+        tokens = response.json()
+        refresh = tokens.get("refresh_token")
+        if not refresh: raise ValueError("Google did not return a refresh token")
+        profile = httpx.get("https://gmail.googleapis.com/gmail/v1/users/me/profile",headers={"Authorization":"Bearer "+tokens["access_token"]},timeout=15)
+        profile.raise_for_status()
+        actual_email = profile.json().get("emailAddress", "").lower()
+        if actual_email != GMAIL_ACCOUNT:
+            raise HTTPException(403, "Connect the designated " + GMAIL_ACCOUNT + " account")
+    except HTTPException: raise
+    except (httpx.HTTPError, KeyError, ValueError):
+        raise HTTPException(502, "Google authorization failed. Please try again.")
+    connection = db.get(OwnerGmailConnection, user.id)
+    if connection is None:
+        connection = OwnerGmailConnection(user_id=user.id, account_email=actual_email, encrypted_refresh_token="")
+        db.add(connection)
+    connection.encrypted_refresh_token = cipher.encrypt(refresh.encode()).decode()
+    db.commit()
+    result = RedirectResponse("/?gmail=connected", status_code=302)
+    result.delete_cookie("phcrm_google_oauth_nonce")
+    return result
+
+def gmail_access_token(db: Session, user: User):
+    gmail_owner(user)
+    connection = db.get(OwnerGmailConnection, user.id)
+    if not connection: raise HTTPException(409, "Connect Gmail first")
+    client_id, client_secret, _, cipher = gmail_config()
+    try:
+        refresh = cipher.decrypt(connection.encrypted_refresh_token.encode()).decode()
+        response = httpx.post("https://oauth2.googleapis.com/token",data={"client_id":client_id,"client_secret":client_secret,
+           "refresh_token":refresh,"grant_type":"refresh_token"},timeout=15)
+        response.raise_for_status()
+        return response.json()["access_token"]
+    except (InvalidToken, httpx.HTTPError, KeyError):
+        raise HTTPException(502, "Gmail connection expired. Reconnect the account.")
+
+@app.get("/api/owner/gmail/messages")
+def owner_gmail_messages(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    token = gmail_access_token(db,user)
+    headers = {"Authorization":"Bearer "+token}
+    try:
+        response = httpx.get("https://gmail.googleapis.com/gmail/v1/users/me/messages",params={"maxResults":15,"labelIds":"INBOX"},headers=headers,timeout=15)
+        response.raise_for_status()
+        items=[]
+        for message in response.json().get("messages",[]):
+            r=httpx.get("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+message["id"],params={"format":"metadata","metadataHeaders":["From","Subject"]},headers=headers,timeout=15)
+            r.raise_for_status()
+            data=r.json()
+            h={h["name"].lower():h["value"] for h in data.get("payload",{}).get("headers",[])}
+            items.append({"id":data["id"],"subject":h.get("subject") or "(No subject)","sender":h.get("from","")})
+        return items
+    except (httpx.HTTPError, ValueError, KeyError):
+        raise HTTPException(502, "Could not load Gmail messages")
+
+class OwnerEmailTaskCreate(BaseModel):
+    message_id: str = Field(pattern=r"^[a-zA-Z0-9]+$",min_length=4,max_length=100)
+    business: Literal["pale_horse", "crucible_wellness"]
+    due_at: datetime | None = None
+
+@app.post("/api/owner/gmail/import-task", status_code=201)
+def owner_gmail_import_task(payload: OwnerEmailTaskCreate, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    token = gmail_access_token(db,user)
+    try:
+        response=httpx.get("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+payload.message_id,
+            params={"format":"metadata","metadataHeaders":["From","Subject","Message-ID"]},
+            headers={"Authorization":"Bearer "+token},timeout=15)
+        response.raise_for_status()
+        data=response.json()
+        headers={h["name"].lower():h["value"] for h in data.get("payload",{}).get("headers",[])}
+    except (httpx.HTTPError, ValueError, KeyError):
+        raise HTTPException(502, "Cannot retrieve selected email")
+    # Duplicate emails must not generate duplicate tasks. Message ID is not exposed to trainers.
+    source_key="gmail:"+user.id+":"+payload.message_id
+    existing=db.scalar(select(OwnerTaskEvent).where(OwnerTaskEvent.action=="gmail_import",OwnerTaskEvent.detail==source_key))
+    if existing: raise HTTPException(409, "This email is already an owner task")
+    from email.utils import parseaddr
+    name,addr=parseaddr(headers.get("from",""))
+    title=(headers.get("subject") or "Email follow-up").strip()[:180]
+    task=OwnerTask(business=payload.business, kind="follow_up",title=title,contact_name=name[:150],contact_email=addr[:255],due_at=payload.due_at,notes="Imported from Gmail. Email content not copied.",created_by_id=user.id)
+    db.add(task); db.flush()
+    owner_event(db,task,user,"gmail_import",source_key)
+    db.commit();db.refresh(task)
+    return owner_task_dict(task)
+
+@app.post("/api/owner/gmail/disconnect")
+def owner_gmail_disconnect(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    gmail_owner(user)
+    connection=db.get(OwnerGmailConnection,user.id)
+    if connection: db.delete(connection);db.commit()
+    return {"ok":True}
+
+
+# -------- v0.2.8: classes and non-client blocks --------
+class GymEventSlotIn(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    start_time: time
+    duration_minutes: int = Field(ge=15, le=240)
+
+class GymEventIn(BaseModel):
+    name: str = Field(min_length=2, max_length=150)
+    kind: Literal["class", "block"]
+    coach_ids: list[str] = Field(min_length=1, max_length=8)
+    start_date: date
+    until_date: date | None = None
+    slots: list[GymEventSlotIn] = Field(min_length=1, max_length=7)
+
+class GymRosterChange(BaseModel):
+    lead_id: str
+    active: bool
+
+class GymOccMove(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+
+class GymOccStatus(BaseModel):
+    status: Literal["confirmed", "cancelled"]
+
+def gym_event_access(db: Session, event_id: str, actor: User):
+    ev = db.get(GymEvent, event_id)
+    if not ev: raise HTTPException(404, "Class or block not found")
+    if actor.role not in ("owner", "admin") and not db.scalar(select(GymEventCoach.id).where(
+            GymEventCoach.event_id == event_id, GymEventCoach.coach_id == actor.id,
+            GymEventCoach.active == True)):
+        raise HTTPException(403, "Not a coach for this event")
+    return ev
+
+def gym_event_summary(db, ev):
+    coaches = db.scalars(select(GymEventCoach).where(GymEventCoach.event_id == ev.id, GymEventCoach.active == True)).all()
+    members = db.scalars(select(GymEventMember).where(GymEventMember.event_id == ev.id, GymEventMember.active == True)).all()
+    occurrences = db.scalars(select(GymEventOccurrence).where(GymEventOccurrence.event_id == ev.id).order_by(GymEventOccurrence.starts_at)).all()
+    return {"id": ev.id, "name": ev.name, "kind": ev.kind, "active": ev.active,
+            "coaches": [{"id": c.coach_id,"name": db.get(User,c.coach_id).name} for c in coaches],
+            "members": [{"id":m.lead_id,"name":db.get(Lead,m.lead_id).name} for m in members],
+            "occurrences": [{"id":o.id,"starts_at":iso(o.starts_at),"ends_at":iso(o.ends_at),"status":o.status} for o in occurrences]}
+
+def gym_log(db,ev,actor,action,detail=""):
+    db.add(GymEventLog(event_id=ev.id, actor_id=actor.id, action=action, detail=detail))
+
+def generate_gym_slots(data):
+    if data.until_date and data.until_date < data.start_date:
+        raise HTTPException(422, "End date is before start date")
+    if data.until_date and (data.until_date - data.start_date).days > 364:
+        raise HTTPException(422, "Schedule up to one year at a time, then extend as needed")
+    # Limit materialization to one year. Ongoing groups can be extended in later releases.
+    finish = min(data.until_date or (data.start_date + timedelta(days=364)), data.start_date + timedelta(days=364))
+    if finish < data.start_date: raise HTTPException(422, "Invalid date range")
+    seen = set()
+    result = []
+    day = data.start_date
+    while day <= finish:
+        for slot in data.slots:
+            if day.weekday() != slot.weekday: continue
+            start = datetime.combine(day,slot.start_time,LOCAL_TZ).astimezone(timezone.utc)
+            end = (datetime.combine(day,slot.start_time,LOCAL_TZ) + timedelta(minutes=slot.duration_minutes)).astimezone(timezone.utc)
+            if end <= start: raise HTTPException(422,"Invalid session time")
+            key=(start,end)
+            if key in seen: raise HTTPException(422,"Duplicate class slot")
+            seen.add(key); result.append(key)
+        day += timedelta(days=1)
+    if not result: raise HTTPException(422,"No sessions match selected days")
+    # Detect overlapping slots within the same class.
+    result.sort()
+    if any(a[0] < b[1] and a[1] > b[0] for a,b in zip(result[1:],result[:-1])):
+        raise HTTPException(422,"The selected class slots overlap")
+    return result
+
+def gym_validate(db, coach_ids, slots, except_occurrence=None):
+    for cid in coach_ids:
+        for start,end in slots:
+            if gym_busy(db,cid,start,end,except_occurrence):
+                raise HTTPException(409,f"Coach already has a class or block at {start.isoformat()}")
+            if db.scalar(select(ClientSession.id).where(ClientSession.trainer_id == cid,
+                     ClientSession.status == "confirmed", ClientSession.starts_at < end,
+                     ClientSession.ends_at > start)):
+                raise HTTPException(409,f"Coach has a client session at {start.isoformat()}")
+            if db.scalar(select(Assignment.id).where(Assignment.trainer_id == cid,
+                     Assignment.status == "confirmed", Assignment.starts_at < end,
+                     Assignment.ends_at > start)):
+                raise HTTPException(409,f"Coach has an assignment at {start.isoformat()}")
+
+@app.get("/api/gym-events")
+def list_gym_events(user:User=Depends(current_user), db:Session=Depends(db_session)):
+    stmt=select(GymEvent).where(GymEvent.active == True).order_by(GymEvent.created_at.desc())
+    if user.role == "trainer":
+        stmt=stmt.join(GymEventCoach, GymEventCoach.event_id == GymEvent.id).where(
+            GymEventCoach.coach_id == user.id, GymEventCoach.active == True)
+    return [gym_event_summary(db,e) for e in db.scalars(stmt).all()]
+
+@app.post("/api/gym-events/preview")
+def preview_gym_event(data:GymEventIn,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    coach_ids=list(dict.fromkeys(data.coach_ids))
+    if user.role == "trainer" and coach_ids != [user.id]:
+        raise HTTPException(403,"Trainers can schedule only themselves; owner can assign multiple coaches")
+    for cid in coach_ids:
+        c=db.get(User,cid)
+        if not c or c.role not in ("owner","admin","trainer"):
+            raise HTTPException(422,"Invalid coach")
+    slots=generate_gym_slots(data)
+    gym_validate(db,coach_ids,slots)
+    return {"count":len(slots),"first":iso(slots[0][0]),"last":iso(slots[-1][0]),
+            "message":"No conflicts found. Availability rules still apply to individual appointments."}
+
+@app.post("/api/gym-events",status_code=201)
+def create_gym_event(data:GymEventIn,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    coach_ids=list(dict.fromkeys(data.coach_ids))
+    if user.role == "trainer" and coach_ids != [user.id]:
+        raise HTTPException(403,"Trainers can schedule only themselves")
+    for cid in coach_ids:
+        c=db.get(User,cid)
+        if not c or c.role not in ("owner","admin","trainer"):
+            raise HTTPException(422,"Invalid coach")
+    slots=generate_gym_slots(data)
+    # Cooperative transaction locks protect simultaneous class/block creation on PostgreSQL.
+    if engine.dialect.name == "postgresql":
+        for cid in sorted(coach_ids):
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),{"key":"gym-event-"+cid})
+    gym_validate(db,coach_ids,slots)
+    ev=GymEvent(name=data.name.strip(),kind=data.kind,created_by_id=user.id)
+    db.add(ev);db.flush()
+    for cid in coach_ids: db.add(GymEventCoach(event_id=ev.id,coach_id=cid))
+    for slot in data.slots:
+        db.add(GymEventPattern(event_id=ev.id,weekday=slot.weekday,start_time=slot.start_time,
+              duration_minutes=slot.duration_minutes,materialized_through=datetime.combine(min(data.until_date or (data.start_date+timedelta(days=364)),data.start_date + timedelta(days=364)),time.min),
+              end_date=datetime.combine(data.until_date,time.min) if data.until_date else None))
+    for start,end in slots: db.add(GymEventOccurrence(event_id=ev.id,starts_at=start,ends_at=end))
+    gym_log(db,ev,user,"created",f"{len(slots)} occurrences; {len(coach_ids)} coaches")
+    db.commit()
+    return gym_event_summary(db,ev)
+
+@app.post("/api/gym-events/{event_id}/members")
+def change_gym_roster(event_id:str,data:GymRosterChange,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    ev=gym_event_access(db,event_id,user)
+    if ev.kind != "class": raise HTTPException(422,"Only classes have clients")
+    lead=db.get(Lead,data.lead_id)
+    if not lead or lead.stage != "converted" or (user.role == "trainer" and lead.assigned_trainer_id != user.id):
+        raise HTTPException(403,"Use an approved active client")
+    member=db.scalar(select(GymEventMember).where(GymEventMember.event_id == event_id,
+                                                  GymEventMember.lead_id == data.lead_id))
+    if data.active and not member: db.add(GymEventMember(event_id=event_id,lead_id=data.lead_id))
+    elif member:
+        member.active=data.active
+        member.left_at=None if data.active else datetime.now(timezone.utc)
+    gym_log(db,ev,user,"member_added" if data.active else "member_removed",data.lead_id)
+    db.commit()
+    return gym_event_summary(db,ev)
+
+@app.post("/api/gym-events/{event_id}/occurrences/{occ_id}/status")
+def gym_occurrence_status(event_id:str,occ_id:str,data:GymOccStatus,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    ev=gym_event_access(db,event_id,user)
+    o=db.get(GymEventOccurrence,occ_id)
+    if not o or o.event_id != event_id: raise HTTPException(404)
+    if data.status == "confirmed" and o.status != "confirmed":
+        coaches=db.scalars(select(GymEventCoach).where(GymEventCoach.event_id==event_id,GymEventCoach.active==True)).all()
+        gym_validate(db,[c.coach_id for c in coaches],[(utc(o.starts_at),utc(o.ends_at))],o.id)
+    o.status=data.status
+    gym_log(db,ev,user,"occurrence_status",data.status+":"+occ_id)
+    db.commit()
+    return {"ok":True}
+
+@app.post("/api/gym-events/{event_id}/occurrences/{occ_id}/move")
+def gym_occurrence_move(event_id:str,occ_id:str,data:GymOccMove,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    ev=gym_event_access(db,event_id,user)
+    o=db.get(GymEventOccurrence,occ_id)
+    if not o or o.event_id != event_id: raise HTTPException(404)
+    start,end=interval(data.starts_at,data.ends_at)
+    coaches=db.scalars(select(GymEventCoach).where(GymEventCoach.event_id==event_id,GymEventCoach.active==True)).all()
+    gym_validate(db,[c.coach_id for c in coaches],[(start,end)],o.id)
+    before=iso(o.starts_at)
+    o.starts_at=start;o.ends_at=end
+    gym_log(db,ev,user,"occurrence_moved",before+" -> "+iso(start))
+    db.commit()
+    return {"ok":True}
+
+@app.get("/api/gym-events/{event_id}/history")
+def gym_event_history(event_id:str,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    gym_event_access(db,event_id,user)
+    return [{"action":e.action,"detail":e.detail,"created_at":iso(e.created_at)} for e in
+            db.scalars(select(GymEventLog).where(GymEventLog.event_id==event_id).order_by(GymEventLog.created_at.desc())).all()]
+
+@app.get("/api/owner/daily-briefing")
+def daily_briefing(user:User=Depends(current_user),db:Session=Depends(db_session)):
+    owner_only(user)
+    today=datetime.now(LOCAL_TZ).date()
+    tasks=db.scalars(select(OwnerTask).where(OwnerTask.status=="open")).all()
+    due=[{"id":t.id,"title":t.title,"business":t.business,"due_at":iso(t.due_at)} for t in tasks
+         if t.due_at and utc(t.due_at).astimezone(LOCAL_TZ).date() <= today]
+    pending=db.scalars(select(ClientOnboarding).where(ClientOnboarding.status=="pending")).all()
+    assignments=db.scalars(select(Assignment).where(Assignment.status.in_(["pending","proposed"]))).all()
+    return {"date":today.isoformat(),"tasks":due,"onboarding_count":len(pending),
+            "assignment_count":len(assignments),"email_enabled":False,
+            "email_message":"Connect and authorize Google Workspace sending before daily email delivery can be enabled."}
+
+@app.get("/api/gym-events/coaches")
+def gym_coaches(user:User=Depends(current_user),db:Session=Depends(db_session)):
+    if user.role=="trainer":
+        return [{"id":user.id,"name":user.name}]
+    owner_only(user)
+    return [{"id":u.id,"name":u.name} for u in db.scalars(
+        select(User).where(User.role.in_(["owner","admin","trainer"])).order_by(User.name)).all()]
+
+class GymCoachChange(BaseModel):
+    coach_id: str
+    active: bool
+
+@app.post("/api/gym-events/{event_id}/coaches")
+def change_gym_coach(event_id:str,data:GymCoachChange,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    owner_only(user)
+    ev=gym_event_access(db,event_id,user)
+    coach=db.get(User,data.coach_id)
+    if not coach or coach.role not in ("trainer","owner","admin"):
+        raise HTTPException(422,"Invalid coach")
+    existing=db.scalar(select(GymEventCoach).where(GymEventCoach.event_id==event_id,
+                                                    GymEventCoach.coach_id==data.coach_id))
+    if data.active:
+        slots=[(utc(o.starts_at),utc(o.ends_at)) for o in db.scalars(
+            select(GymEventOccurrence).where(GymEventOccurrence.event_id==event_id,
+                                              GymEventOccurrence.status=="confirmed")).all()]
+        gym_validate(db,[data.coach_id],slots)
+        if existing: existing.active=True
+        else: db.add(GymEventCoach(event_id=event_id,coach_id=data.coach_id))
+    else:
+        active_coaches=db.scalars(select(GymEventCoach).where(GymEventCoach.event_id==event_id,
+                                                              GymEventCoach.active==True)).all()
+        if len(active_coaches)<=1 and existing and existing.active:
+            raise HTTPException(422,"A class or block needs at least one coach")
+        if existing: existing.active=False
+    gym_log(db,ev,user,"coach_added" if data.active else "coach_removed",data.coach_id)
+    db.commit()
+    return gym_event_summary(db,ev)
+
+
+@app.post("/api/gym-events/{event_id}/extend")
+def extend_gym_event(event_id:str,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    ev=gym_event_access(db,event_id,user)
+    patterns=db.scalars(select(GymEventPattern).where(GymEventPattern.event_id==event_id)).all()
+    if not patterns: raise HTTPException(422,"This event has no weekly schedule")
+    coach_ids=[c.coach_id for c in db.scalars(select(GymEventCoach).where(
+        GymEventCoach.event_id==event_id,GymEventCoach.active==True)).all()]
+    slots=[]
+    new_marks=[]
+    for rule in patterns:
+        if rule.end_date and rule.materialized_through.date() >= rule.end_date.date():
+            continue
+        first=rule.materialized_through.date()+timedelta(days=1)
+        end=min(first + timedelta(days=182),rule.end_date.date() if rule.end_date else first+timedelta(days=182))
+        # Reuse normal generation and validation rather than bypassing conflict checks.
+        data=GymEventIn(name=ev.name,kind=ev.kind,coach_ids=coach_ids,start_date=first,until_date=end,
+                        slots=[GymEventSlotIn(weekday=rule.weekday,start_time=rule.start_time,
+                                              duration_minutes=rule.duration_minutes)])
+        slots += generate_gym_slots(data)
+        new_marks.append((rule,end))
+    if not slots: return {"added":0,"message":"Already scheduled through the end date"}
+    if engine.dialect.name == "postgresql":
+        for cid in sorted(coach_ids):
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),{"key":"gym-event-"+cid})
+    gym_validate(db,coach_ids,slots)
+    for a,b in slots: db.add(GymEventOccurrence(event_id=ev.id,starts_at=a,ends_at=b))
+    for rule,day in new_marks: rule.materialized_through=datetime.combine(day,time.min)
+    gym_log(db,ev,user,"extended",f"Added {len(slots)} occurrences")
+    db.commit()
+    return {"added":len(slots)}
