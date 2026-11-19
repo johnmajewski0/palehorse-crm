@@ -62,3 +62,12 @@
 .mt-contact{display:flex;gap:10px;margin-top:13px}.mt-contact a{padding:10px 19px;background:#303030;border-radius:6px;color:#fff;text-decoration:none;font-weight:600}.mt-search{display:block;font-size:13px;color:#ccc}.mt-search input{font-size:16px}.mt-back{display:flex;align-items:center;gap:7px;background:none;border:0;color:#eee;padding:12px 0;margin-bottom:12px}
 .mt-nav{position:fixed;bottom:0;left:0;right:0;z-index:9;background:#151515;border-top:1px solid #444;padding:8px 4px calc(8px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,1fr)}.mt-nav button{background:none;border:0;color:#9b9b9b;min-height:53px;display:flex;flex-direction:column;gap:3px;justify-content:center;align-items:center;font-size:11px}.mt-nav button.active{color:#fff;font-weight:750}.mt-nav button:focus-visible,.mt-action:focus-visible{outline:2px solid #fff;outline-offset:2px}
 .mobile-trainer .main{padding:0}.mobile-trainer .schedule-page,.mobile-trainer .cal-page,.mobile-trainer .sessions-page{min-width:0}.mobile-trainer .panel-title{flex-wrap:wrap}.mobile-trainer .schedule-pad{padding:14px}.mobile-trainer .session-item-actions{gap:6px}.mobile-trainer .session-item-actions button{min-height:44px}.mobile-trainer .cal-grid{overflow-x:auto}
+
+/* v0.3.0 release-candidate: compact, keyboard-friendly desktop navigation */
+.nav-group{border-top:1px solid #2b2b2b;padding:5px 0}
+.nav-group summary{cursor:pointer;color:#aaa;padding:10px 13px;font-size:11px;text-transform:uppercase;letter-spacing:.12em;font-weight:700;list-style-position:inside}
+.nav-group summary:hover,.nav-group summary:focus-visible{color:#fff;background:#202020}
+.nav-group .nav{padding:11px 13px 11px 23px;font-size:12px}
+.ux-first-actions{padding:0 24px 20px;display:flex;flex-wrap:wrap;gap:10px}
+.ux-first-actions button{white-space:normal;text-align:left}
+@media(max-width:700px){.nav-group .nav{padding:12px!important}}

@@ -1,4 +1,4 @@
-import React,{useEffect,useState} from 'react';
+﻿import React,{useEffect,useState} from 'react';
 import {CalendarDays,Check,Clock3,Bell,Plus} from 'lucide-react';
 
 type User={id:string,role:string};
@@ -24,20 +24,57 @@ export default function Scheduling({me,trainers,leads,onChanged}:{me:User,traine
  useEffect(()=>{reload().catch(e=>setError(String(e)))},[]);
  useEffect(()=>{if(trainer)api('/scheduling/availability/'+trainer).then(setAvailability).catch(e=>setError(String(e)))},[trainer]);
  async function run(action:()=>Promise<any>){setError('');setNotice('');try{await action();await reload();await onChanged();if(trainer)setAvailability(await api('/scheduling/availability/'+trainer));setNotice('Changes saved.')}catch(e){setError(String(e))}}
- async function decide(a:Assignment,action:string){let note='';let starts_at,ends_at;if(['decline','return','propose','cancel'].includes(action)){note=prompt('Reason or note (optional):')??''}if(action==='propose'){const newStart=prompt('Proposed start (YYYY-MM-DDTHH:MM, local time):',localInput(new Date(a.starts_at)));if(!newStart)return;const newEnd=prompt('Proposed end (YYYY-MM-DDTHH:MM, local time):',localInput(new Date(a.ends_at)));if(!newEnd)return;starts_at=new Date(newStart).toISOString();ends_at=new Date(newEnd).toISOString()}await run(()=>api('/scheduling/assignments/'+a.id+'/action','POST',{action,note,starts_at,ends_at}))}
+ async function decide(a: Assignment, action: string) {
+  let note = '';
+  let starts_at: string | undefined;
+  let ends_at: string | undefined;
+
+  if (['decline', 'return', 'propose', 'cancel'].includes(action)) {
+    note = prompt('Reason or note (optional):') ?? '';
+  }
+
+  if (action === 'propose') {
+    const newStart = prompt(
+      'Proposed start (YYYY-MM-DDTHH:MM, local time):',
+      localInput(new Date(a.starts_at))
+    );
+
+    if (!newStart) return;
+
+    const newEnd = prompt(
+      'Proposed end (YYYY-MM-DDTHH:MM, local time):',
+      localInput(new Date(a.ends_at))
+    );
+
+    if (!newEnd) return;
+
+    starts_at = new Date(newStart).toISOString();
+    ends_at = new Date(newEnd).toISOString();
+  }
+
+  await run(() =>
+    api('/scheduling/assignments/' + a.id + '/action', 'POST', {
+      action,
+      note,
+      starts_at,
+      ends_at
+    })
+  );
+}
  async function history(id:string){try{setHistories(p=>({...p,[id]:[]}));const events=await api('/scheduling/assignments/'+id+'/history');setHistories(p=>({...p,[id]:events}))}catch(e){setError(String(e))}}
  const field=(name:string,children:React.ReactNode)=><label className="schedule-field">{name}{children}</label>;
- return <div className="schedule-page"><div className="schedule-heading"><div><p className="kicker">OPERATIONS / SCHEDULING</p><h1>Trainer scheduling<span className="accent">.</span></h1><p className="muted">Availability, assignments, approvals and complete history · America/New_York</p></div><CalendarDays size={28}/></div>
- {error&&<div className="error-banner" onClick={()=>setError('')}>{error} · Dismiss</div>}{notice&&<p className="schedule-success">{notice}</p>}
+ return <div className="schedule-page"><div className="schedule-heading"><div><p className="kicker">OPERATIONS / SCHEDULING</p><h1>Trainer scheduling<span className="accent">.</span></h1><p className="muted">Availability, assignments, approvals and complete history Â· America/New_York</p></div><CalendarDays size={28}/></div>
+ {error&&<div className="error-banner" onClick={()=>setError('')}>{error} Â· Dismiss</div>}{notice&&<p className="schedule-success">{notice}</p>}
  <div className="panel"><div className="panel-title"><div><h2><Clock3 size={18}/> Availability</h2><p>Weekly working hours and date-specific changes.</p></div></div><div className="schedule-pad">
  {owner&&field('Trainer',<select value={trainer} onChange={e=>setTrainer(e.target.value)}><option value="">Select a trainer</option>{trainers.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select>)}
  {trainer&&<><h3>Recurring hours</h3><div className="schedule-row">{field('Day',<select value={weekday} onChange={e=>setWeekday(Number(e.target.value))}>{weekdays.map((d,i)=><option value={i} key={d}>{d}</option>)}</select>)}{field('Start',<input type="time" value={startTime} onChange={e=>setStartTime(e.target.value)}/>)}{field('End',<input type="time" value={endTime} onChange={e=>setEndTime(e.target.value)}/>)}<button className="secondary" onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/rules','POST',{weekday,start_time:startTime,end_time:endTime}))}><Plus size={15}/> ADD HOURS</button></div>
- <div className="schedule-chips">{availability.rules.map(r=><span key={r.id} className="schedule-chip">{weekdays[r.weekday]} {r.start_time.slice(0,5)}–{r.end_time.slice(0,5)} <button onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/archive/'+r.id,'POST'))} title="Archive rule">×</button></span>)}{availability.rules.length===0&&<p className="muted">No recurring hours entered.</p>}</div>
+ <div className="schedule-chips">{availability.rules.map(r=><span key={r.id} className="schedule-chip">{weekdays[r.weekday]} {r.start_time.slice(0,5)}â€“{r.end_time.slice(0,5)} <button onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/archive/'+r.id,'POST'))} title="Archive rule">Ã—</button></span>)}{availability.rules.length===0&&<p className="muted">No recurring hours entered.</p>}</div>
  <h3>Exceptions / time off</h3><div className="schedule-row">{field('Start',<input type="datetime-local" value={exStart} onChange={e=>setExStart(e.target.value)}/>)}{field('End',<input type="datetime-local" value={exEnd} onChange={e=>setExEnd(e.target.value)}/>)}{field('Type',<select value={kind} onChange={e=>setKind(e.target.value)}><option value="unavailable">Time off</option><option value="available">Additional hours</option></select>)}{field('Reason',<input value={reason} onChange={e=>setReason(e.target.value)}/>)}<button className="secondary" onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/exceptions','POST',{starts_at:new Date(exStart).toISOString(),ends_at:new Date(exEnd).toISOString(),kind,reason}))}><Plus size={15}/> ADD</button></div>
- <div className="schedule-chips">{availability.exceptions.map(e=><span className="schedule-chip" key={e.id}>{e.kind}: {format(e.starts_at)} — {format(e.ends_at)} {e.reason} <button onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/archive/'+e.id,'POST'))}>×</button></span>)}</div></>}
+ <div className="schedule-chips">{availability.exceptions.map(e=><span className="schedule-chip" key={e.id}>{e.kind}: {format(e.starts_at)} â€” {format(e.ends_at)} {e.reason} <button onClick={()=>run(()=>api('/scheduling/availability/'+trainer+'/archive/'+e.id,'POST'))}>Ã—</button></span>)}</div></>}
  </div></div>
  {owner&&<div className="panel"><div className="panel-title"><div><h2>Request trainer assignment</h2><p>Request a client appointment; the trainer must confirm.</p></div></div><div className="schedule-pad"><div className="schedule-row">{field('Prospect / client',<select value={leadId} onChange={e=>setLeadId(e.target.value)}><option value="">Choose client</option>{leads.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select>)}{field('Trainer',<select value={assignTrainer} onChange={e=>setAssignTrainer(e.target.value)}><option value="">Choose trainer</option>{trainers.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select>)}{field('Start',<input type="datetime-local" value={assignStart} onChange={e=>setAssignStart(e.target.value)}/>)}{field('End',<input type="datetime-local" value={assignEnd} onChange={e=>setAssignEnd(e.target.value)}/>)}</div><div className="schedule-row">{field('Assignment note',<input value={assignNote} onChange={e=>setAssignNote(e.target.value)} placeholder="First session, preferences, etc."/>)}<button className="primary" disabled={!leadId||!assignTrainer} onClick={()=>run(()=>api('/scheduling/assignments','POST',{lead_id:leadId,trainer_id:assignTrainer,starts_at:new Date(assignStart).toISOString(),ends_at:new Date(assignEnd).toISOString(),note:assignNote}))}>REQUEST ASSIGNMENT</button></div></div></div>}
- <div className="panel"><div className="panel-title"><div><h2>Assignment queue</h2><p>Every request stays on record, including declines and returns.</p></div></div><div className="table-wrap"><table><thead><tr><th>CLIENT</th><th>TRAINER</th><th>SESSION</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>{assignments.map(a=><React.Fragment key={a.id}><tr><td><b>{a.lead_name}</b><small>{a.note}</small></td><td>{a.trainer_name}</td><td>{format(a.starts_at)}<small>to {format(a.ends_at)}</small></td><td><span className="stage">{a.status}</span></td><td><div className="schedule-actions">{!owner&&a.status==='pending'&&<><button onClick={()=>decide(a,'accept')}>ACCEPT</button><button onClick={()=>decide(a,'decline')}>DECLINE</button><button onClick={()=>decide(a,'propose')}>PROPOSE TIME</button></>}{!owner&&a.status==='confirmed'&&<button onClick={()=>decide(a,'return')}>RETURN TO OWNER</button>}{owner&&a.status==='proposed'&&<button onClick={()=>decide(a,'approve_proposal')}>APPROVE TIME</button>}{owner&&['pending','proposed','confirmed'].includes(a.status)&&<button onClick={()=>decide(a,'cancel')}>CANCEL</button>}<button onClick={()=>history(a.id)}>HISTORY</button></div></td></tr>{histories[a.id]&&<tr><td colSpan={5}><div className="schedule-history">{histories[a.id].map(e=><div key={e.created_at+e.action}><strong>{e.action}</strong> · {format(e.created_at)} · {e.detail}</div>)}</div></td></tr>}</React.Fragment>)}{assignments.length===0&&<tr><td colSpan={5} className="empty">No assignment requests yet.</td></tr>}</tbody></table></div></div>
+ <div className="panel"><div className="panel-title"><div><h2>Assignment queue</h2><p>Every request stays on record, including declines and returns.</p></div></div><div className="table-wrap"><table><thead><tr><th>CLIENT</th><th>TRAINER</th><th>SESSION</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>{assignments.map(a=><React.Fragment key={a.id}><tr><td><b>{a.lead_name}</b><small>{a.note}</small></td><td>{a.trainer_name}</td><td>{format(a.starts_at)}<small>to {format(a.ends_at)}</small></td><td><span className="stage">{a.status}</span></td><td><div className="schedule-actions">{!owner&&a.status==='pending'&&<><button onClick={()=>decide(a,'accept')}>ACCEPT</button><button onClick={()=>decide(a,'decline')}>DECLINE</button><button onClick={()=>decide(a,'propose')}>PROPOSE TIME</button></>}{!owner&&a.status==='confirmed'&&<button onClick={()=>decide(a,'return')}>RETURN TO OWNER</button>}{owner&&a.status==='proposed'&&<button onClick={()=>decide(a,'approve_proposal')}>APPROVE TIME</button>}{owner&&['pending','proposed','confirmed'].includes(a.status)&&<button onClick={()=>decide(a,'cancel')}>CANCEL</button>}<button onClick={()=>history(a.id)}>HISTORY</button></div></td></tr>{histories[a.id]&&<tr><td colSpan={5}><div className="schedule-history">{histories[a.id].map(e=><div key={e.created_at+e.action}><strong>{e.action}</strong> Â· {format(e.created_at)} Â· {e.detail}</div>)}</div></td></tr>}</React.Fragment>)}{assignments.length===0&&<tr><td colSpan={5} className="empty">No assignment requests yet.</td></tr>}</tbody></table></div></div>
  <div className="panel"><div className="panel-title"><div><h2><Bell size={18}/> Notifications</h2><p>In-app alerts only. Gmail integration is planned for a later release.</p></div></div><div className="schedule-pad">{notifications.map(n=><div className="schedule-notification" key={n.id}><span>{n.message}<small>{format(n.created_at)}</small></span>{!n.read_at&&<button className="secondary" onClick={()=>run(()=>api('/scheduling/notifications/'+n.id+'/read','POST'))}><Check size={14}/> MARK READ</button>}</div>)}{notifications.length===0&&<p className="muted">No notifications yet.</p>}</div></div>
  </div>
 }
+
